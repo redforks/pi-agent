@@ -193,3 +193,59 @@ describe('config validation (fail-loud)', () => {
     expect(() => createExtension(api as never)).not.toThrow()
   })
 })
+
+describe('native ask-user hook', () => {
+  const kinds = ['select', 'confirm', 'input', 'editor', 'custom'] as const
+
+  it.each(kinds)('ui_prompt_start with kind %s runs on_ask_user commands in order', async (kind) => {
+    const marker = join(homeDir, `ask-${kind}.txt`)
+    writeConfig({ on_ask_user: [`printf 'a' >> '${marker}'`, `printf 'b' >> '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind }, {})
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'ab')
+  })
+
+  it('two separate waiting spans fire twice', async () => {
+    const marker = join(homeDir, 'ask-twice.txt')
+    writeConfig({ on_ask_user: [`printf 'x' >> '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'select' }, {})
+    await waitUntil(() => existsSync(marker))
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'input' }, {})
+    await waitUntil(() => readFileSync(marker, 'utf8') === 'xx')
+  })
+
+  it('a coalesced span fires once: one observed start = one fire, end adds nothing', async () => {
+    const marker = join(homeDir, 'ask-once.txt')
+    writeConfig({ on_ask_user: [`printf 'x' >> '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    // The host coalesces nested/overlapping prompts into a single outer
+    // ui_prompt_start; the extension fires once per observed start.
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'select' }, {})
+    await waitUntil(() => existsSync(marker))
+    emit(api, 'ui_prompt_end', { type: 'ui_prompt_end', reason: 'ui_prompt', kind: 'select' }, {})
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readFileSync(marker, 'utf8')).toBe('x')
+  })
+
+  it('ui_prompt_end is never subscribed and fires nothing', () => {
+    writeConfig({ on_ask_user: [`printf x >> '${join(homeDir, 'never-end.txt')}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    expect(api.handlers.has('ui_prompt_end')).toBe(false)
+  })
+
+  it('nothing fires when on_ask_user is empty', async () => {
+    const marker = join(homeDir, 'ask-empty.txt')
+    writeConfig({ on_ask_user: [], on_agent_finish: [`printf x > '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'confirm' }, {})
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(marker)).toBe(false)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+})
