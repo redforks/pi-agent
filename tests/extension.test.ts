@@ -193,3 +193,94 @@ describe('config validation (fail-loud)', () => {
     expect(() => createExtension(api as never)).not.toThrow()
   })
 })
+
+describe('runner edge semantics (#10)', () => {
+  it('duplicate commands run once per slot, in position order', async () => {
+    const marker = join(homeDir, 'dup.txt')
+    writeConfig({ on_agent_finish: [`printf 'x' >> '${marker}'`, `printf 'x' >> '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'xx')
+  })
+
+  it('empty and whitespace-only entries are skipped with no spawn and no warning', async () => {
+    const marker = join(homeDir, 'blank.txt')
+    writeConfig({ on_agent_finish: ['', '   ', ' \t\n ', `printf ok > '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(marker))
+    await new Promise((r) => setTimeout(r, 200))
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it('a spawn-level failure warns with the command and the error, without throwing', async () => {
+    const emptyBin = mkdtempSync(join(tmpdir(), 'pi-notify-emptybin-'))
+    const savedPath = process.env.PATH
+    process.env.PATH = emptyBin
+    try {
+      writeConfig({ on_agent_finish: [`printf unreachable`] })
+      const api = makeFakeAPI()
+      createExtension(api as never)
+      expect(() => emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))).not.toThrow()
+      await waitUntil(() => vi.mocked(console.warn).mock.calls.length > 0)
+      const message = String(vi.mocked(console.warn).mock.calls[0]?.[0])
+      expect(message).toContain('printf unreachable')
+      expect(message).toMatch(/ENOENT|EACCES|\bsh\b/)
+    } finally {
+      process.env.PATH = savedPath
+    }
+  })
+
+  it('{title}/{message}/{toolName} literals run unchanged and no env vars are added', async () => {
+    const marker = join(homeDir, 'literal.txt')
+    const envDump = join(homeDir, 'envdump.txt')
+    process.env.PI_NOTIFY_RUNNER_PROBE = 'probe-10'
+    try {
+      writeConfig({
+        on_agent_finish: [
+          `printf '%s' '{title} {message} {toolName}' > '${marker}'`,
+          `env > '${envDump}'`,
+        ],
+      })
+      const api = makeFakeAPI()
+      createExtension(api as never)
+      emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+      await waitUntil(() => existsSync(marker) && existsSync(envDump))
+      expect(readFileSync(marker, 'utf8')).toBe('{title} {message} {toolName}')
+      const envText = readFileSync(envDump, 'utf8')
+      expect(envText).toContain('PI_NOTIFY_RUNNER_PROBE=probe-10')
+      expect(envText).not.toContain('PI_NOTIFY_COMMAND=')
+      expect(envText).not.toContain('NOTIFY_TITLE=')
+    } finally {
+      delete process.env.PI_NOTIFY_RUNNER_PROBE
+    }
+  })
+
+  it('a slow first command never delays later commands on the event path', async () => {
+    const slow = join(homeDir, 'slow.txt')
+    const quick = join(homeDir, 'quick.txt')
+    writeConfig({
+      on_agent_finish: [`sleep 2; printf done > '${slow}'`, `printf quick > '${quick}'`],
+    })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    const start = Date.now()
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(quick))
+    expect(Date.now() - start).toBeLessThan(1500)
+    expect(readFileSync(quick, 'utf8')).toBe('quick')
+  })
+
+  it('non-zero exits and signals are ignored, later commands still run', async () => {
+    const marker = join(homeDir, 'exitcode.txt')
+    writeConfig({ on_agent_finish: [`exit 3`, `kill -TERM $$`, `printf survived > '${marker}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    expect(() => emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))).not.toThrow()
+    await waitUntil(() => existsSync(marker))
+    expect(readFileSync(marker, 'utf8')).toBe('survived')
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+})
