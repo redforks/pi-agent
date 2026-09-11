@@ -38,17 +38,23 @@ Method: inspect-only review of this repo (greenfield: `AGENTS.md` + `docs/agents
 7. Malformed-config contract (warn where? fail open or closed? coerce?).
 8. Spawn contract (timeout, continue-on-error, env, cwd, output, quoting).
 
-## Suggested spec citations (all TO-VERIFY)
-
+## Suggested spec citations (VERIFIED — ticket #6, 2026-09-11)
 ```ts
-// TO-VERIFY against pi ExtensionAPI source/docs.
-events.on('agent_settled', (ctx) => { /* ctx.isIdle() === true */ });
-events.on('agent_end', (ctx) => { /* per-run only; must NOT trigger on_agent_finish */ });
-events.on('ui_prompt_start', (payload) => { /* payload.kind: 'select'|'confirm'|'input'|'editor'|'custom' */ });
-events.on('ui_prompt_end', (payload) => { /* same kind field; decide start-vs-end */ });
-events.on('tool_call', (payload) => { /* payload.toolName; may block — confirm contract */ });
-events.on('tool_execution_start', (payload) => { /* payload.toolCallId, payload.toolName, payload.args */ });
-events.on('tool_execution_end', (payload) => { /* + payload.result */ });
+// VERIFIED against https://pi.dev/docs/latest/extensions (ticket #6).
+// Pipeline order per tool call: tool_execution_start -> tool_call -> tool_execution_update -> tool_result -> tool_execution_end.
+// agent_settled carries NO payload; gate on ctx.isIdle(). agent_end carries event.messages (per-run only).
+events.on('agent_settled', (ctx) => { /* ctx.isIdle() === true unless another extension started a run */ });
+events.on('agent_end', (event) => { /* event.messages; per-run only; must NOT trigger on_agent_finish */ });
+// ui_prompt_start: event.reason === 'ui_prompt', event.kind, event.title. Notification-only, best-effort, NOT awaited;
+// nested/overlapping prompts coalesce into one outer span. ui_prompt_end carries NO kind/detail.
+events.on('ui_prompt_start', (event) => { /* event.kind: 'select'|'confirm'|'input'|'editor'|'custom' */ });
+events.on('ui_prompt_end', () => { /* waiting span ended; no payload to match on */ });
+// tool_call fires AFTER tool_execution_start, before execution; can block via { block: true, reason?, terminate? };
+// event.input mutable (patches args); handler errors block the tool (fail-safe). Fires for custom tools too
+// (isToolCallEventType supports custom-tool narrowing).
+events.on('tool_call', (event) => { /* event.toolName, event.toolCallId, event.input */ });
+events.on('tool_execution_start', (event) => { /* event.toolCallId, event.toolName, event.args — observer only */ });
+events.on('tool_execution_end', (event) => { /* event.toolCallId, event.toolName, event.result, event.isError */ });
 ```
 
 ```jsonc
@@ -68,6 +74,6 @@ events.on('tool_execution_end', (payload) => { /* + payload.result */ });
 for (const cmd of config.on_agent_finish) await spawn('sh', ['-c', cmd], { timeout: 15000 });
 ```
 
-## Verification checklist (for the follow-up verification task)
+## Verification record (ticket #6, 2026-09-11)
 
-Needs network / pi checkout: open `https://pi.dev/docs/latest/extensions`, the pi repo's `ExtensionAPI` / events type definitions, and the installed `@juicesharp/rpiv-ask-user-question` source; confirm each name/field above and correct the spec citations before build.
+Confirmed verbatim against https://pi.dev/docs/latest/extensions: agent_settled / agent_end (+event.messages) / ui_prompt_start (reason/kind/title) / ui_prompt_end / tool_call (toolName/toolCallId/input, blocking contract, fail-safe) / tool_execution_start (toolCallId/toolName/args) / tool_execution_end (+result/isError) / pi.events bus. Ordering tool_execution_start -> tool_call corrected (was assumed reverse). Open questions 1-5 resolved; 6-8 (config path, malformed contract, spawn) stay with the grilling tickets — no documented pi convention for extension-owned config files found; rpiv precedent is XDG ~/.config/<name>/config.json (see @juicesharp/rpiv-config, loadJsonConfigWithLegacyFallback).
