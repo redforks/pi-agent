@@ -1,0 +1,17 @@
+{
+  "name": "pi-notify",
+  "version": "0.0.1",
+  "private": true,
+  "description": "pi extension: run configured shell commands when the agent finishes or asks for input",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
