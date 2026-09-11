@@ -193,3 +193,73 @@ describe('config validation (fail-loud)', () => {
     expect(() => createExtension(api as never)).not.toThrow()
   })
 })
+
+describe('extra ask-tool hook (#12)', () => {
+  const toolCall = (toolName: string) => ({
+    type: 'tool_call',
+    toolCallId: 'call-1',
+    toolName,
+    input: {},
+  })
+
+  function setup(extraAskUserTool: string[], onAskUser: string[]) {
+    writeConfig({ on_ask_user: onAskUser, extra_ask_user_tool: extraAskUserTool })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    return api
+  }
+
+  it('an exact tool_call match runs on_ask_user once and never blocks', async () => {
+    const marker = join(homeDir, 'ask.txt')
+    const api = setup(['ask_user_question'], [`printf fired > '${marker}'`])
+    const results = emit(api, 'tool_call', toolCall('ask_user_question'), {})
+    expect(results).toEqual([undefined])
+    await waitUntil(() => existsSync(marker))
+    expect(readFileSync(marker, 'utf8')).toBe('fired')
+  })
+
+  it.each([
+    ['different case', 'Ask_User_Question'],
+    ['dashes', 'ask-user-question'],
+    ['trailing space', 'ask_user_question '],
+    ['prefix', 'ask_user_questio'],
+    ['extended', 'ask_user_question_extra'],
+  ])('near-miss %s fires nothing', async (_label, toolName) => {
+    const marker = join(homeDir, 'near-miss.txt')
+    const api = setup(['ask_user_question'], [`printf x > '${marker}'`])
+    emit(api, 'tool_call', toolCall(toolName), {})
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('tool_execution_start and tool_execution_end are never subscribed', () => {
+    const api = setup(['ask_user_question'], [`printf x > '${join(homeDir, 'exec.txt')}'`])
+    expect(api.handlers.has('tool_execution_start')).toBe(false)
+    expect(api.handlers.has('tool_execution_end')).toBe(false)
+  })
+
+  it('a duplicate tool-name entry still fires exactly once per call', async () => {
+    const marker = join(homeDir, 'dup.txt')
+    const api = setup(['ask_user_question', 'ask_user_question'], [`printf x >> '${marker}'`])
+    emit(api, 'tool_call', toolCall('ask_user_question'), {})
+    await waitUntil(() => existsSync(marker))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(readFileSync(marker, 'utf8')).toBe('x')
+  })
+
+  it('two separate matching calls fire twice', async () => {
+    const marker = join(homeDir, 'twice.txt')
+    const api = setup(['ask_user_question'], [`printf x >> '${marker}'`])
+    emit(api, 'tool_call', toolCall('ask_user_question'), {})
+    emit(api, 'tool_call', { ...toolCall('ask_user_question'), toolCallId: 'call-2' }, {})
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'xx')
+  })
+
+  it('nothing fires when extra_ask_user_tool is empty', async () => {
+    const marker = join(homeDir, 'empty-tools.txt')
+    const api = setup([], [`printf x > '${marker}'`])
+    emit(api, 'tool_call', toolCall('ask_user_question'), {})
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(marker)).toBe(false)
+  })
+})
