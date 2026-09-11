@@ -40,6 +40,13 @@ async function waitUntil(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   }
 }
 
+// Appends `byte` to `marker` only once the marker already holds `n` bytes, so
+// the written content order is deterministic no matter how concurrent shells
+// are scheduled.
+function appendAfter(marker: string, byte: string, n: number): string {
+  return `while [ "$(wc -c < '${marker}' 2>/dev/null || echo 0)" -lt ${n} ]; do sleep 0.01; done; printf '${byte}' >> '${marker}'`
+}
+
 // Temp home holding the config: the extension resolves the home from the
 // process environment, so tests point HOME at a fresh temp dir.
 let homeDir: string
@@ -74,7 +81,7 @@ afterEach(() => {
 describe('walking skeleton: on_agent_finish', () => {
   it('runs each on_agent_finish command in array order on idle settle', async () => {
     const marker = join(homeDir, 'order.txt')
-    writeConfig({ on_agent_finish: [`printf 'a' >> '${marker}'`, `printf 'b' >> '${marker}'`] })
+    writeConfig({ on_agent_finish: [appendAfter(marker, 'a', 0), appendAfter(marker, 'b', 1)] })
     const api = makeFakeAPI()
     createExtension(api as never)
     emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
@@ -347,7 +354,7 @@ describe('native ask-user hook', () => {
 
   it.each(kinds)('ui_prompt_start with kind %s runs on_ask_user commands in order', async (kind) => {
     const marker = join(homeDir, `ask-${kind}.txt`)
-    writeConfig({ on_ask_user: [`printf 'a' >> '${marker}'`, `printf 'b' >> '${marker}'`] })
+    writeConfig({ on_ask_user: [appendAfter(marker, 'a', 0), appendAfter(marker, 'b', 1)] })
     const api = makeFakeAPI()
     createExtension(api as never)
     emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind }, {})
@@ -465,5 +472,92 @@ describe('extra ask-tool hook (#12)', () => {
     emit(api, 'tool_call', toolCall('ask_user_question'), {})
     await new Promise((r) => setTimeout(r, 300))
     expect(existsSync(marker)).toBe(false)
+  })
+})
+
+describe('overlap ordering (#13)', () => {
+  // Deterministic completion-order checks with real shells: appendAfter makes
+  // each entry wait for the bytes before it, so the marker sequence is stable
+  // no matter how the shells are scheduled. Spawn order itself — the runner
+  // FIFO — is pinned by the mocked-spawn tests in runner.test.ts and
+  // extension-order.test.ts.
+  const nativeAsk = { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'select' }
+  const settle = { type: 'agent_settled' }
+  const toolAsk = {
+    type: 'tool_call',
+    toolCallId: 'call-overlap',
+    toolName: 'ask_user_question',
+    input: {},
+  }
+
+  function setup(onAskUser: string[], onAgentFinish: string[], extraAskUserTool: string[] = []) {
+    writeConfig({ on_ask_user: onAskUser, on_agent_finish: onAgentFinish, extra_ask_user_tool: extraAskUserTool })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    return api
+  }
+
+
+  it('an ask observed before a settle runs both lists, the ask entries completing first', async () => {
+    const marker = join(homeDir, 'overlap-ask-first.txt')
+    const api = setup(
+      [appendAfter(marker, '1', 0), appendAfter(marker, '2', 1)],
+      [appendAfter(marker, '3', 2), appendAfter(marker, '4', 3)],
+    )
+    emit(api, 'ui_prompt_start', nativeAsk, {})
+    emit(api, 'agent_settled', settle, idleCtx(true))
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === '1234')
+  })
+
+  it('a third-party ask observed before a settle also completes its entries first', async () => {
+    const marker = join(homeDir, 'overlap-tool-ask-first.txt')
+    const api = setup(
+      [appendAfter(marker, 'a', 0)],
+      [appendAfter(marker, 'f', 1)],
+      ['ask_user_question'],
+    )
+    emit(api, 'tool_call', toolAsk, {})
+    emit(api, 'agent_settled', settle, idleCtx(true))
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'af')
+  })
+
+  it('neither hook suppresses the other: an ask and its settle both run', async () => {
+    const askMarker = join(homeDir, 'overlap-ask.txt')
+    const finishMarker = join(homeDir, 'overlap-finish.txt')
+    const api = setup(
+      [`printf asked > '${askMarker}'`],
+      [`printf finished > '${finishMarker}'`],
+    )
+    emit(api, 'ui_prompt_start', nativeAsk, {})
+    emit(api, 'agent_settled', settle, idleCtx(true))
+    await waitUntil(() => existsSync(askMarker) && existsSync(finishMarker))
+    expect(readFileSync(askMarker, 'utf8')).toBe('asked')
+    expect(readFileSync(finishMarker, 'utf8')).toBe('finished')
+  })
+
+  it('a settle observed before a later ask keeps the observed completion order', async () => {
+    const marker = join(homeDir, 'overlap-finish-first.txt')
+    const api = setup(
+      [appendAfter(marker, '3', 2), appendAfter(marker, '4', 3)],
+      [appendAfter(marker, '1', 0), appendAfter(marker, '2', 1)],
+    )
+    emit(api, 'agent_settled', settle, idleCtx(true))
+    emit(api, 'ui_prompt_start', nativeAsk, {})
+    await waitUntil(() => existsSync(marker) && readFileSync(marker, 'utf8') === '1234')
+  })
+
+
+  it('an ask followed by a non-idle settle runs only the ask list', async () => {
+    const askMarker = join(homeDir, 'overlap-non-idle-ask.txt')
+    const finishMarker = join(homeDir, 'overlap-non-idle-finish.txt')
+    const api = setup(
+      [`printf asked > '${askMarker}'`],
+      [`printf finished > '${finishMarker}'`],
+    )
+    emit(api, 'ui_prompt_start', nativeAsk, {})
+    emit(api, 'agent_settled', settle, idleCtx(false))
+    await waitUntil(() => existsSync(askMarker))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(finishMarker)).toBe(false)
   })
 })

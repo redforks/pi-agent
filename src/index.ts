@@ -16,8 +16,12 @@ import { runCommands } from './runner.js'
  * a single outer span — and on each `tool_call` whose `event.toolName` is an
  * exact, case-sensitive, full-string member of `extra_ask_user_tool`, every
  * `on_ask_user` command runs the same way, at call-start before the tool
- * executes. `tool_execution_start` is deliberately not subscribed (it fires
- * before `tool_call`, so subscribing to both would double-fire), nor are
+ * executes. Both hooks enqueue in observed order onto the runner's single
+ * global FIFO (`runCommands`, runner.ts), so a coincident ask and settle
+ * both fire with the first-observed hook's entries ahead, and neither hook
+ * suppresses the other. `tool_execution_start` is deliberately not
+ * subscribed (it fires before `tool_call`, so subscribing to both would
+ * double-fire), nor are
  * `tool_execution_end` and the package `rpiv:ask-user:prompt` event (whose
  * payload carries no `toolCallId`).
  *
