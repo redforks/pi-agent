@@ -172,10 +172,21 @@ describe('walking skeleton: on_agent_finish', () => {
 describe('config validation (fail-loud)', () => {
   it.each([
     ['syntax error', '{not json,', 'invalid JSON'],
-    ['non-object root', '[1, 2]', 'must be an object'],
-    ['non-array field', { on_agent_finish: 'notify_send' }, 'on_agent_finish'],
-    ['non-string entry', { on_agent_finish: [42] }, 'on_agent_finish'],
+    ['trailing comma', '{"on_agent_finish": [],}', 'invalid JSON'],
+    ['non-object root (array)', '[1, 2]', 'must be an object'],
+    ['non-object root (string)', '"just a string"', 'must be an object'],
+    ['non-object root (number)', '42', 'must be an object'],
+    ['non-object root (null)', 'null', 'must be an object'],
+    ['non-array on_agent_finish', { on_agent_finish: 'notify_send' }, 'on_agent_finish'],
+    ['non-array on_ask_user', { on_ask_user: 'notify_send' }, 'on_ask_user'],
+    ['non-array extra_ask_user_tool', { extra_ask_user_tool: 'ask_user_question' }, 'extra_ask_user_tool'],
+    ['null field value', { on_agent_finish: null }, 'on_agent_finish'],
+    ['numeric entry', { on_agent_finish: [42] }, 'on_agent_finish'],
+    ['object entry', { on_agent_finish: [{ command: 'x' }] }, 'on_agent_finish'],
+    ['null entry', { on_ask_user: [null] }, 'on_ask_user'],
+    ['non-string tool entry', { extra_ask_user_tool: [7] }, 'extra_ask_user_tool'],
     ['unknown key', { on_agent_finishh: [] }, 'on_agent_finishh'],
+    ['unknown key alongside valid', { on_agent_finish: [], extra: [] }, 'extra'],
   ])('%s throws naming the file and reason', (_label, body, fragment) => {
     writeConfig(body as never)
     const api = makeFakeAPI()
@@ -187,9 +198,55 @@ describe('config validation (fail-loud)', () => {
     )
   })
 
-  it('missing fields default to empty arrays', () => {
+  it('missing fields default to empty arrays', async () => {
     writeConfig({})
     const api = makeFakeAPI()
     expect(() => createExtension(api as never)).not.toThrow()
+    // An all-default config fires nothing on an idle settle.
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await new Promise((r) => setTimeout(r, 200))
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it('a failed load subscribes nothing, so pi continues without pi-notify', () => {
+    writeConfig('{not json,')
+    const api = makeFakeAPI()
+    expect(() => createExtension(api as never)).toThrow()
+    expect(api.handlers.size).toBe(0)
+  })
+
+  it('partial configs load: only the configured hook fires', async () => {
+    const marker = join(homeDir, 'partial.txt')
+    writeConfig({ on_agent_finish: [`printf fired > '${marker}'`] })
+    const api = makeFakeAPI()
+    expect(() => createExtension(api as never)).not.toThrow()
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(marker))
+  })
+
+  it('config is read once at load: later file changes are never reloaded', async () => {
+    const markerA = join(homeDir, 'first.txt')
+    const markerB = join(homeDir, 'second.txt')
+    writeConfig({ on_agent_finish: [`printf a > '${markerA}'`] })
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    // Rewrite the config after load; the extension must keep the old snapshot.
+    writeConfig({ on_agent_finish: [`printf b > '${markerB}'`] })
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(markerA))
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(markerB)).toBe(false)
+  })
+
+  it('config file is never written by the extension', async () => {
+    const marker = join(homeDir, 'readonly.txt')
+    writeConfig({ on_agent_finish: [`printf x > '${marker}'`] })
+    const configPath = join(homeDir, '.pi', 'pi-notify.json')
+    const before = readFileSync(configPath, 'utf8')
+    const api = makeFakeAPI()
+    createExtension(api as never)
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    await waitUntil(() => existsSync(marker))
+    expect(readFileSync(configPath, 'utf8')).toBe(before)
   })
 })
