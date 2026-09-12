@@ -71,6 +71,15 @@ In `--print` / `--mode json` (`ctx.hasUI === false`):
 
 This is expected degradation, not a bug. pi-notify never polls or works around it.
 
+## Subagents
+
+When `PI_SUBAGENT_CHILD` is `"1"` (processes hosting pi-subagents child
+sessions), pi-notify stays fully inert: it returns before reading
+`~/.pi/pi-notify.json` or subscribing to any event, so neither hook fires
+and a present-but-invalid config stays silent. `PI_SUBAGENT_PARENT_SESSION`
+is ignored — the root session sets it too. Subagents outside pi-subagents are
+out of scope.
+
 ## Load it
 
 - Quick test: `pi -e /path/to/pi-notify/src/index.ts`

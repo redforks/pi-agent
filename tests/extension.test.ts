@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-import createExtension from '../src/index.js'
+import createExtension, { SUBAGENT_CHILD_ENV } from '../src/index.js'
 
 type Handler = (event: unknown, ctx: unknown) => unknown
 
@@ -560,4 +560,56 @@ describe('overlap ordering (#13)', () => {
     await new Promise((r) => setTimeout(r, 300))
     expect(existsSync(finishMarker)).toBe(false)
   })
+})
+
+describe('subagent gate (pi-subagents child host)', () => {
+  let savedChild: string | undefined
+
+  beforeEach(() => {
+    savedChild = process.env[SUBAGENT_CHILD_ENV]
+  })
+
+  afterEach(() => {
+    if (savedChild === undefined) delete process.env[SUBAGENT_CHILD_ENV]
+    else process.env[SUBAGENT_CHILD_ENV] = savedChild
+  })
+
+  it('CHILD=1 subscribes to nothing and fires nothing, even with a valid config', async () => {
+    process.env[SUBAGENT_CHILD_ENV] = '1'
+    const marker = join(homeDir, 'subagent-silent.txt')
+    writeConfig({
+      on_agent_finish: [`printf x > '${marker}'`],
+      on_ask_user: [`printf y >> '${marker}'`],
+      extra_ask_user_tool: ['ask_user_question'],
+    })
+    const api = makeFakeAPI()
+    expect(() => createExtension(api as never)).not.toThrow()
+    expect(api.handlers.size).toBe(0)
+    emit(api, 'agent_settled', { type: 'agent_settled' }, idleCtx(true))
+    emit(api, 'ui_prompt_start', { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'select' }, {})
+    emit(api, 'tool_call', { type: 'tool_call', toolCallId: 'c1', toolName: 'ask_user_question', input: {} }, {})
+    await new Promise((r) => setTimeout(r, 300))
+    expect(existsSync(marker)).toBe(false)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it('CHILD=1 never reads config: a present-but-invalid file stays silent', () => {
+    process.env[SUBAGENT_CHILD_ENV] = '1'
+    writeConfig('{not json,')
+    const api = makeFakeAPI()
+    expect(() => createExtension(api as never)).not.toThrow()
+    expect(api.handlers.size).toBe(0)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it.each([['unset', undefined], ['empty', ''], ['zero', '0'], ['true-word', 'true']])(
+    'CHILD=%s still loads normally (exact "1" match only)',
+    (_label, value) => {
+      if (value === undefined) delete process.env[SUBAGENT_CHILD_ENV]
+      else process.env[SUBAGENT_CHILD_ENV] = value
+      const api = makeFakeAPI()
+      expect(() => createExtension(api as never)).not.toThrow()
+      expect(api.handlers.get('agent_settled')).toHaveLength(1)
+    },
+  )
 })

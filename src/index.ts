@@ -28,8 +28,17 @@ import { runCommands } from './runner.js'
  * Observer-only: handlers never return a block decision and never mutate
  * event input. `agent_end`, `session_shutdown` and `ui_prompt_end` are never
  * subscribed.
+ *
+ * Subagent gate: when `PI_SUBAGENT_CHILD` is `"1"` (set in processes that
+ * host pi-subagents child sessions) the factory returns before loading
+ * config or subscribing, staying fully inert. `PI_SUBAGENT_PARENT_SESSION`
+ * is deliberately ignored — the root session sets it too, so it cannot
+ * distinguish main agent from subagent.
  */
+export const SUBAGENT_CHILD_ENV = 'PI_SUBAGENT_CHILD'
+
 export default function (pi: ExtensionAPI): void {
+  if (process.env[SUBAGENT_CHILD_ENV] === '1') return
   const config = loadConfig()
   const askTools = new Set(config.extra_ask_user_tool)
 
